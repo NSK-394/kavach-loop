@@ -4,10 +4,11 @@ LLM-generated patch for CVE-2026-33017, with live apply + verify_patch()
 confirmation.
 
 Pipeline this module completes: detection -> patch_gen -> proof_harness.
-detection/ isn't built yet, so get_detection_result() below is a clearly
-marked hardcoded stand-in for the AGREED CONTRACT detection/ will eventually
-produce -- swapping it for a real call is meant to be a one-function change,
-see the comment on get_detection_result().
+get_detection_result() calls detection/detect.py's detect_vulnerability(),
+which runs a real Semgrep rule against source extracted live from the
+target container -- this used to be a hardcoded stand-in for the AGREED
+CONTRACT before detection/ existed; the swap ended up being exactly the
+one-function change it was designed for, see get_detection_result() below.
 
 WHAT THIS ACTUALLY DOES (no mocked steps):
   1. generate_patch()  -- fetches the REAL current source of the vulnerable
@@ -81,43 +82,30 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from proof_harness.verify import verify_patch  # noqa: E402
+from detection.detect import detect_vulnerability  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Detection input (hardcoded stand-in until detection/ lands)
+# Detection input
 #
-# This is the AGREED CONTRACT between detection/ and patch_gen/. When
-# detection/ exists, the only change needed is inside get_detection_result()
-# below -- generate_patch()'s signature and every caller stay identical.
+# This used to be a hardcoded stand-in dict matching the AGREED CONTRACT
+# between detection/ and patch_gen/, kept only until detection/ existed.
+# detection/ is now real (detection/detect.py's detect_vulnerability() runs
+# a Semgrep rule against source extracted live from the target container),
+# and this is the one-function swap that was always the plan --
+# generate_patch()'s signature and every caller are unchanged.
 # ---------------------------------------------------------------------------
-
-_HARDCODED_DETECTION = {
-    "file": "src/backend/base/langflow/api/v1/chat.py",
-    "line": 580,
-    "sink_type": "exec",
-    "taint_source": "HTTP request body (data parameter) on unauthenticated build_public_tmp route",
-    "cve_reference": "CVE-2026-33017",
-    "description": (
-        "build_public_tmp accepts attacker-controlled `data` instead of the "
-        "flow's stored definition; the embedded `code` field is later passed "
-        "to exec() via prepare_global_scope() with zero sandboxing and no "
-        "auth check on this route."
-    ),
-}
 
 
 def get_detection_result() -> dict:
     """
-    Swap point for detection/. Currently returns the hardcoded stand-in
-    above. Once detection/ exists, replace this function's body with
-    something like:
-
-        from detection.detect import run_detection
-        return run_detection(target_url)
-
-    -- generate_patch(get_detection_result()) elsewhere in this file (and
-    any other caller) needs no changes.
+    Runs detection/'s real Semgrep-based scan and returns its finding in
+    the AGREED CONTRACT shape. See detection/detect.py's module docstring
+    for exactly what the underlying rule does and doesn't prove -- it
+    surfaces "unauthenticated route forwards a body param to a call" as a
+    candidate, and only returns a finding here once that candidate is
+    confirmed against the known CVE-2026-33017 location.
     """
-    return _HARDCODED_DETECTION
+    return detect_vulnerability()
 
 
 # ---------------------------------------------------------------------------
@@ -673,7 +661,7 @@ _MAX_ATTEMPTS = 3
 
 if __name__ == "__main__":
     detection = get_detection_result()
-    print("[*] detection input (hardcoded stand-in for detection/):")
+    print("[*] detection input (from detection/detect.py's live Semgrep scan):")
     print(json.dumps(detection, indent=2))
 
     gen = None

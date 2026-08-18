@@ -1,0 +1,66 @@
+rules:
+  - id: unauthenticated-exec-sink
+    languages: [python]
+    severity: ERROR
+    message: >
+      FastAPI route handler '$FUNC' has no authentication dependency (no
+      'current_user' parameter and no 'Depends(get_current_active_user)' /
+      similar in the route decorator), but accepts a request-body parameter
+      '$DATAPARAM' that is forwarded, unchanged, into the call
+      '$SINKCALL(..., $DATAPARAM, ...)'. This rule does NOT prove that
+      $SINKCALL eventually reaches exec()/eval() -- it flags the
+      SIGNAL that matters when auth is missing: attacker-controlled
+      structural input reaching a downstream call at all. For
+      CVE-2026-33017, manual tracing confirmed the real chain is
+      start_flow_build() -> generate_flow_events() -> create_graph() ->
+      build_graph_from_data() -> Graph.from_payload() ->
+      _instantiate_components_in_vertices() -> instantiate_class() ->
+      eval_custom_component_code() -> prepare_global_scope() -> exec().
+      Every match this rule produces needs that same manual confirmation
+      before it's treated as a real RCE, not just a candidate.
+    metadata:
+      cve: CVE-2026-33017
+      advisory: GHSA-vwmf-pq79-vjvx
+      confidence: LOW
+      category: security
+      note: >
+        Intentionally NOT full inter-procedural taint tracking through the
+        exec() sink six call-hops away -- see message. This rule's real job
+        is "unauthenticated route + attacker structural input forwarded to
+        a call", which is the reliably-detectable signal in the time
+        available. Every candidate needs manual confirmation.
+    patterns:
+      # Primary shape: a decorated async route handler that declares a
+      # body-shaped parameter (by name) and forwards that exact parameter,
+      # unchanged, as a keyword argument to some downstream call, anywhere
+      # in its body (the two `...` gaps allow other params/statements
+      # in between).
+      - pattern: |
+          @$ROUTER.$METHOD(...)
+          async def $FUNC(..., $DATAPARAM : $DATATYPE, ...):
+              ...
+              $SINKCALL(..., $KW=$DATAPARAM, ...)
+      # Only care about params that look like they carry structure/code,
+      # not e.g. `flow_id: uuid.UUID` or `log_builds: bool`. This is a
+      # deliberate, narrow allowlist -- widening it (e.g. to any param)
+      # would make the rule fire on nearly every POST handler in a FastAPI
+      # app and stop being a useful signal.
+      - metavariable-regex:
+          metavariable: $DATAPARAM
+          regex: (?i)^(data|payload|flow_data|graph_data|body_data)$
+      # Auth convention #1 seen in this codebase: a `current_user`-named
+      # parameter directly in the handler's own signature (e.g.
+      # `current_user: CurrentActiveUser`). Exclude if present.
+      - pattern-not: |
+          @$ROUTER.$METHOD(...)
+          async def $FUNC(..., current_user: $AUTHTYPE, ...):
+              ...
+      # Auth convention #2 seen in this codebase: auth enforced at the
+      # decorator level via `dependencies=[Depends(get_current_active_user)]`
+      # rather than a function parameter (see retrieve_vertices_order in
+      # chat.py, which is otherwise a near-identical shape to the real
+      # vulnerable route but IS protected this way). Exclude if present.
+      - pattern-not: |
+          @$ROUTER.$METHOD(..., dependencies=[..., Depends($AUTHFUNC), ...], ...)
+          async def $FUNC(...):
+              ...
