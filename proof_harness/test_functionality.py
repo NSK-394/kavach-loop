@@ -197,6 +197,61 @@ def check_openapi_schema(base_url: str, token: str) -> None:
     assert "paths" in resp.json(), "openapi document missing 'paths'"
 
 
+def check_public_flow_build(base_url: str, token: str) -> None:
+    """
+    POST /api/v1/build_public_tmp/{flow_id}/flow -- the UNAUTHENTICATED
+    public-build endpoint that is CVE-2026-33017 itself (see
+    exploit_repro/exploit.py). This check exists because patch_gen's first
+    generated fix for this CVE was caught, via this exact check, doing the
+    wrong thing: it blocked the exploit by making start_flow_build() raise
+    TypeError on every call (a missing required keyword argument), which
+    "worked" for pov_blocked but silently killed the legitimate public-flow
+    feature for every caller, authenticated or not. None of the other
+    checks in this file happen to call this endpoint, so that regression
+    was invisible to them -- confidence_score would have read 1.0 for a
+    patch that broke a real feature. This check closes that blind spot: it
+    creates a real PUBLIC flow and builds it the normal way (no attacker
+    payload, no auth -- exactly how a legitimate public/shared flow is
+    meant to work), and requires a real job_id back, not just "not a 500".
+    """
+    headers = {"Authorization": f"Bearer {token}"}
+    flow_id = None
+    try:
+        create_resp = requests.post(
+            f"{base_url}/api/v1/flows/",
+            headers=headers,
+            json={
+                "name": "kavach-loop-functest-public-build",
+                "data": {"nodes": [], "edges": []},
+                "access_type": "PUBLIC",
+            },
+            timeout=10,
+        )
+        assert create_resp.status_code in (200, 201), (
+            f"create failed: {create_resp.status_code} {create_resp.text}"
+        )
+        flow_id = create_resp.json()["id"]
+
+        # No Authorization header, no `data` body field -- this is exactly
+        # how a legitimate anonymous visitor builds a public/shared flow.
+        build_resp = requests.post(
+            f"{base_url}/api/v1/build_public_tmp/{flow_id}/flow",
+            cookies={"client_id": "kavach-loop-functest"},
+            timeout=15,
+        )
+        assert build_resp.status_code == 200, (
+            f"legitimate public flow build failed: HTTP {build_resp.status_code} "
+            f"{build_resp.text} -- the patch may have broken the public-flow "
+            f"feature while blocking the exploit (see this function's docstring)"
+        )
+        assert "job_id" in build_resp.json(), f"no job_id in response: {build_resp.text}"
+    finally:
+        if flow_id is not None:
+            requests.delete(
+                f"{base_url}/api/v1/flows/{flow_id}", headers=headers, timeout=10
+            )
+
+
 _CHECKS = [
     check_health,
     check_version,
@@ -205,6 +260,7 @@ _CHECKS = [
     check_list_flows,
     check_flow_crud_lifecycle,
     check_openapi_schema,
+    check_public_flow_build,
 ]
 
 
